@@ -1,4 +1,3 @@
-import os
 import re
 import sqlite3
 from datetime import datetime
@@ -6,16 +5,23 @@ import telebot
 from telebot import types
 
 # ================= НАСТРОЙКИ =================
-# Бот берёт токен и ID из настроек хостинга (или из кавычек, если не заданы переменные)
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8873587943:AAH5vwpWWbn212_sTgnXoVK9DtFdLBoL1FM")
-ALLOWED_USER_ID = int(os.environ.get("ALLOWED_USER_ID", "789460400"))  # Твой числовой Telegram ID
+BOT_TOKEN = "8873587943:AAH5vwpWWbn212_sTgnXoVK9DtFdLBoL1FM"
+# Твой ID для панели администратора (чтобы смотреть статистику бота)
+ADMIN_ID = 789460400 
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
 # ================= БАЗА ДАННЫХ =================
+def get_db():
+    # timeout=15 предотвращает блокировку базы при одновременных запросах
+    conn = sqlite3.connect("finances.db", timeout=15)
+    conn.execute("PRAGMA journal_mode=WAL;")  # Быстрый многопользовательский режим
+    return conn
+
 def init_db():
-    with sqlite3.connect("finances.db") as conn:
+    with get_db() as conn:
         cursor = conn.cursor()
+        # Таблица трат
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS transactions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -26,9 +32,28 @@ def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Таблица пользователей (для учета аудитории)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         conn.commit()
 
 init_db()
+
+# Регистрация нового пользователя
+def register_user(user):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT OR IGNORE INTO users (user_id, username, first_name)
+            VALUES (?, ?, ?)
+        """, (user.id, user.username or "", user.first_name or ""))
+        conn.commit()
 
 # ================= СЛОВАРЬ КАТЕГОРИЙ =================
 CATEGORIES = {
@@ -74,11 +99,7 @@ def detect_category(item_name: str) -> str:
                 return cat
     return "📦 Другое"
 
-def is_authorized(obj) -> bool:
-    if ALLOWED_USER_ID == 0:
-        return True
-    return obj.from_user.id == ALLOWED_USER_ID
-
+# ================= КЛАВИАТУРЫ =================
 def get_main_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("📊 Сегодня", "📅 Этот месяц")
@@ -103,42 +124,61 @@ def get_categories_keyboard(trans_id: int):
     kb.add(*buttons)
     return kb
 
-# ================= ОБРАБОТЧИКИ =================
+# ================= ОБРАБОТЧИКИ КОМАНД =================
 @bot.message_handler(commands=['start'])
 def handle_start(message):
-    if not is_authorized(message): return
+    register_user(message.from_user)
     bot.send_message(
         message.chat.id,
-        "👋 **CoinKeeper готов к учету расходов!**\n\n"
-        "Отправляй траты: `кофе 300` или `маршрутка 40`.\n"
-        "Категория определится автоматически.",
+        "👋 **Добро пожаловать в персональный CoinKeeper!**\n\n"
+        "Я помогаю вести учет расходов. Твоя статистика доступна **только тебе**.\n\n"
+        "Просто напиши покупку и сумму:\n"
+        "• `кофе 300`\n"
+        "• `маршрутка 40`\n"
+        "• `бургер 350`\n"
+        "• `продукты 1200`\n\n"
+        "Категория определится автоматически!",
         parse_mode="Markdown",
         reply_markup=get_main_keyboard()
     )
 
-@bot.message_handler(commands=['myid'])
-def handle_myid(message):
-    bot.reply_to(message, f"Твой Telegram ID: `{message.from_user.id}`", parse_mode="Markdown")
+@bot.message_handler(commands=['admin'])
+def handle_admin(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM users")
+        total_users = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM transactions")
+        total_trans = cursor.fetchone()[0]
+
+    bot.send_message(
+        message.chat.id,
+        f"👑 **Статистика администратора:**\n\n"
+        f"👥 Всего пользователей: **{total_users}**\n"
+        f"📝 Всего записей трат: **{total_trans}**",
+        parse_mode="Markdown"
+    )
 
 @bot.message_handler(func=lambda msg: msg.text == "❓ Справка")
 def handle_help(message):
-    if not is_authorized(message): return
+    register_user(message.from_user)
     bot.send_message(
         message.chat.id,
-        "📌 **Примеры сообщений:**\n"
-        "• `кофе 300`\n"
-        "• `маршрутка 40`\n"
-        "• `бургер 350`\n"
-        "• `пятерочка 1240`\n\n"
-        "Под каждой записью можно сменить категорию или отменить трату.",
+        "📌 **Как пользоваться:**\n\n"
+        "1. Отправь сообщение вида: `кофе 300` или `450 такси`.\n"
+        "2. Бот автоматически определит категорию.\n"
+        "3. Если категория определилась неверно, нажми *«✏️ Сменить категорию»*.\n"
+        "4. Чтобы удалить ошибочный расход, нажми *«❌ Отменить»*.",
         parse_mode="Markdown"
     )
 
 @bot.message_handler(func=lambda msg: msg.text == "📊 Сегодня")
 def handle_today(message):
-    if not is_authorized(message): return
+    register_user(message.from_user)
     today_str = datetime.now().strftime("%Y-%m-%d")
-    with sqlite3.connect("finances.db") as conn:
+    with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT category, SUM(amount) 
@@ -154,7 +194,7 @@ def handle_today(message):
         return
 
     total = sum(r[1] for r in rows)
-    text = f"📊 **Траты за сегодня:** {total:,.2f} ₽\n\n".replace(",", " ")
+    text = f"📊 **Твои траты за сегодня:** {total:,.2f} ₽\n\n".replace(",", " ")
     for cat, amt in rows:
         pct = (amt / total) * 100
         text += f"{cat}: **{amt:,.2f} ₽** ({pct:.1f}%)\n".replace(",", " ")
@@ -162,9 +202,9 @@ def handle_today(message):
 
 @bot.message_handler(func=lambda msg: msg.text == "📅 Этот месяц")
 def handle_month(message):
-    if not is_authorized(message): return
+    register_user(message.from_user)
     month_str = datetime.now().strftime("%Y-%m")
-    with sqlite3.connect("finances.db") as conn:
+    with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT category, SUM(amount) 
@@ -180,7 +220,7 @@ def handle_month(message):
         return
 
     total = sum(r[1] for r in rows)
-    text = f"📅 **Траты за текущий месяц:** {total:,.2f} ₽\n\n".replace(",", " ")
+    text = f"📅 **Твои траты за текущий месяц:** {total:,.2f} ₽\n\n".replace(",", " ")
     for cat, amt in rows:
         pct = (amt / total) * 100
         bars = int(pct // 10)
@@ -190,8 +230,8 @@ def handle_month(message):
 
 @bot.message_handler(func=lambda msg: msg.text == "📋 Последние траты")
 def handle_history(message):
-    if not is_authorized(message): return
-    with sqlite3.connect("finances.db") as conn:
+    register_user(message.from_user)
+    with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT id, item, amount, category, datetime(created_at, 'localtime')
@@ -206,16 +246,17 @@ def handle_history(message):
         bot.send_message(message.chat.id, "История трат пуста.")
         return
 
-    text = "📋 **Последние операции:**\n\n"
+    text = "📋 **Твои последние операции:**\n\n"
     for row in rows:
         _, item, amt, cat, date_str = row
         dt = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S").strftime("%d.%m %H:%M")
         text += f"• `{dt}` — **{amt:,.2f} ₽** ({item}) | _{cat}_\n".replace(",", " ")
     bot.send_message(message.chat.id, text, parse_mode="Markdown")
 
+# ================= ОБРАБОТКА ВХОДЯЩИХ ТРАТ =================
 @bot.message_handler(content_types=['text'])
 def handle_transaction(message):
-    if not is_authorized(message): return
+    register_user(message.from_user)
     text = message.text.strip().replace(",", ".")
     match = re.search(r"(\d+(?:\.\d+)?)\s*(?:р|руб)?", text)
     if not match:
@@ -229,7 +270,7 @@ def handle_transaction(message):
 
     category = detect_category(item)
 
-    with sqlite3.connect("finances.db") as conn:
+    with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO transactions (user_id, amount, item, category)
@@ -247,26 +288,28 @@ def handle_transaction(message):
         reply_markup=get_action_keyboard(trans_id)
     )
 
+# ================= КНОПКИ =================
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callbacks(call):
-    if not is_authorized(call):
-        bot.answer_callback_query(call.id, "Доступ ограничен.")
-        return
-
     data = call.data
+
+    # Отмена: удаляет только если запись принадлежит именно этому пользователю
     if data.startswith("del_"):
         trans_id = int(data.split("_")[1])
-        with sqlite3.connect("finances.db") as conn:
-            conn.cursor().execute("DELETE FROM transactions WHERE id = ? AND user_id = ?", (trans_id, call.from_user.id))
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM transactions WHERE id = ? AND user_id = ?", (trans_id, call.from_user.id))
             conn.commit()
         bot.edit_message_text("❌ Запись отменена.", call.message.chat.id, call.message.message_id)
         bot.answer_callback_query(call.id, "Удалено")
 
+    # Смена категории
     elif data.startswith("editcat_"):
         trans_id = int(data.split("_")[1])
         bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=get_categories_keyboard(trans_id))
         bot.answer_callback_query(call.id)
 
+    # Применение новой категории
     elif data.startswith("setcat_"):
         parts = data.split("_")
         trans_id = int(parts[1])
@@ -274,8 +317,9 @@ def handle_callbacks(call):
         cat_keys = list(CATEGORIES.keys())
         new_cat = "📦 Другое" if cat_idx == "other" else cat_keys[int(cat_idx)]
 
-        with sqlite3.connect("finances.db") as conn:
-            conn.cursor().execute("UPDATE transactions SET category = ? WHERE id = ? AND user_id = ?", (new_cat, trans_id, call.from_user.id))
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE transactions SET category = ? WHERE id = ? AND user_id = ?", (new_cat, trans_id, call.from_user.id))
             conn.commit()
 
         bot.edit_message_text(
@@ -288,5 +332,5 @@ def handle_callbacks(call):
         bot.answer_callback_query(call.id, f"Категория: {new_cat}")
 
 if __name__ == "__main__":
-    print("Бот CoinKeeper запущен...")
+    print("Многопользовательский CoinKeeper запущен...")
     bot.infinity_polling(skip_pending=True)
