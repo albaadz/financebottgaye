@@ -7,7 +7,7 @@ from telebot import types
 
 # ================= НАСТРОЙКИ =================
 # Бот берёт токен и ID из настроек хостинга (или из кавычек, если не заданы переменные)
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "ВСТАВЬ_ТОКЕН_ЕСЛИ_РЕПО_ПРИВАТНЫЙ")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8873587943:AAH5vwpWWbn212_sTgnXoVK9DtFdLBoL1FM")
 ALLOWED_USER_ID = int(os.environ.get("ALLOWED_USER_ID", "0"))  # Твой числовой Telegram ID
 
 bot = telebot.TeleBot(BOT_TOKEN)
